@@ -12,8 +12,10 @@ include(GNUInstallDirs)
 ## <libnova/ln_types.h> is resolved. But on Mac it its not already in the path and has to be explicitly added.
 
 if (APPLE)
-    ##This one is needed for homebrew
+    ##This one is needed for x86_64 homebrew
 include_directories( "/usr/local/include")
+    ##This one is needed for arm64 homebrew
+include_directories( "/opt/homebrew/include")
     ## This one is needed for Craft
 include_directories("${CMAKE_INSTALL_PREFIX}/include")
 
@@ -124,11 +126,9 @@ IF (UNIX OR APPLE)
             STRING(FIND ${SOURCE_FILE} libsbig DIR6_FOUND)            
             STRING(FIND ${SOURCE_FILE} libinovasdk DIR8_FOUND)
             STRING(FIND ${SOURCE_FILE} libsvbony DIR9_FOUND)
-            STRING(FIND ${SOURCE_FILE} libahp-xc DIR10_FOUND)
-            STRING(FIND ${SOURCE_FILE} libahp-gt DIR11_FOUND)
             IF (NOT ${DIR1_FOUND} EQUAL -1 OR NOT ${DIR2_FOUND} EQUAL -1 OR NOT ${DIR3_FOUND} EQUAL -1 OR NOT ${DIR4_FOUND} EQUAL -1 OR
                 NOT ${DIR5_FOUND} EQUAL -1 OR NOT ${DIR6_FOUND} EQUAL -1 OR NOT ${DIR7_FOUND} EQUAL -1 OR NOT ${DIR8_FOUND} EQUAL -1 OR
-                NOT ${DIR9_FOUND} EQUAL -1 OR NOT ${DIR10_FOUND} EQUAL -1 OR NOT ${DIR11_FOUND} EQUAL -1)
+                NOT ${DIR9_FOUND} EQUAL -1)
                 LIST(REMOVE_ITEM ALL_SOURCE_FILES ${SOURCE_FILE})
             ENDIF ()
         ENDFOREACH ()
@@ -144,6 +144,9 @@ ENDIF ()
 # This is by default OFF, so you must set the option to build them.
 # It is a good idea to run with this option before the 3rd Party build so all the libraries are built first.
 option(BUILD_LIBS "Build 3rd Party Libraries, not 3rd Party Drivers" Off)
+
+option(INDI_INSTALL_FIRMWARE "Install Firmwares" On)
+option(INDI_INSTALL_UDEV_RULES "Install UDEV rules" On)
 
 # Fix MacOS libraries linking
 # Do not ENABLE on production! Should be enabled by INDI core developers only
@@ -194,8 +197,8 @@ option(WITH_SKYWALKER "Install AOK SkyWalker Mount Driver" On)
 option(WITH_TALON6 "Install Talon6 Mount Driver" On)
 option(WITH_PENTAX "Install Pentax Driver" On)
 option(WITH_ASTROLINK4 "Install AstroLink4 Driver" On)
-option(WITH_AHP_XC "Install AHP XC Correlators Driver" On)
-option(WITH_AHP_GT "Install AHP GT Controllers Driver" On)
+option(WITH_AHP_XC "Install AHP XC Correlators Driver" Off)
+option(WITH_AHP_GT "Install AHP GT Controllers Driver" Off)
 option(WITH_ORION_SSG3 "Install Orion StarShoot G3 Driver" On)
 option(WITH_SVBONY "Install SVBONY Camera Driver" On)
 option(WITH_BRESSEREXOS2 "Install Bresser Exos 2 GoTo Mount Driver" On)
@@ -247,6 +250,7 @@ IF (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
         SET(WITH_TOUPBASE Off)
         SET(WITH_QHY Off)
         SET(WITH_SVBONY Off)
+        SET(WITH_ASTROASIS Off)
     endif()
 ENDIF ()
 # Disable apogee, qhy and mi with gcc 4.8 and earlier versions
@@ -339,16 +343,6 @@ add_subdirectory(libricohcamerasdk)
 endif()
 add_subdirectory(libpktriggercord)
 endif (WITH_PENTAX)
-
-# libahp-xc
-if (WITH_AHP_XC)
-add_subdirectory(libahp-xc)
-endif(WITH_AHP_XC)
-
-# libahp-gt
-if (WITH_AHP_GT)
-add_subdirectory(libahp-gt)
-endif(WITH_AHP_GT)
 
 #toupbase dependencies
 if (WITH_TOUPBASE)
@@ -712,8 +706,6 @@ if (WITH_AHP_XC)
 find_package(AHPXC)
 if(AHP_XC_FOUND)
 add_subdirectory(indi-ahp-xc)
-else(AHP_XC_FOUND)
-add_subdirectory(libahp-xc)
 endif(AHP_XC_FOUND)
 endif(WITH_AHP_XC)
 
@@ -878,14 +870,6 @@ endif (WITH_SVBONY AND NOT SVBONY_FOUND)
 if (WITH_PLAYERONE AND NOT PLAYERONE_FOUND)
 message(STATUS "libplayerone was not found and will now be built. Please install this libplayerone first before running cmake again to install indi-playerone.")
 endif (WITH_PLAYERONE AND NOT PLAYERONE_FOUND)
-
-if (WITH_AHP_XC AND NOT AHP_XC_FOUND)
-message(STATUS "libahp-xc was not found and will now be built. Please install libahp-xc first before running cmake again to install indi-ahp-xc.")
-endif (WITH_AHP_XC AND NOT AHP_XC_FOUND)
-
-if (WITH_AHP_GT AND NOT AHP_GT_FOUND)
-message(STATUS "libahp-gt was not found and will now be built. Please install libahp-gt first before running cmake again to install indi-ahpgt.")
-endif (WITH_AHP_GT AND NOT AHP_GT_FOUND)
 
 if (WITH_ASTROASIS AND NOT ASTROASIS_FOUND)
 message(STATUS "libastroasis was not found and will now be built. Please install libastroasis first before running cmake again to install indi-astroasis.")

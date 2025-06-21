@@ -23,6 +23,7 @@
 
 #include <indiccd.h>
 #include <inditimer.h>
+#include <indielapsedtimer.h>
 #include "libtoupbase.h"
 
 class ToupBase : public INDI::CCD
@@ -100,19 +101,12 @@ class ToupBase : public INDI::CCD
         //#############################################################################
         // Guiding
         //#############################################################################
-        // N/S Guiding
-        static void TimerHelperNS(void *context);
-        void TimerNS();
-        void stopTimerNS();
-        IPState guidePulseNS(uint32_t ms, eGUIDEDIRECTION dir, const char *dirName);
-        int m_NStimerID { -1 };
-
-        // W/E Guiding
-        static void TimerHelperWE(void *context);
-        void TimerWE();
-        void stopTimerWE();
-        IPState guidePulseWE(uint32_t ms, eGUIDEDIRECTION dir, const char *dirName);
-        int m_WEtimerID { -1 };
+        IPState guidePulse(INDI::Timer &timer, float ms, eGUIDEDIRECTION dir);
+        const char *toString(eGUIDEDIRECTION dir);
+        void stopGuidePulse(INDI::Timer &timer);
+        // Timers
+        INDI::Timer mTimerNS;
+        INDI::Timer mTimerWE;
 
         //#############################################################################
         // Setup & Controls
@@ -268,12 +262,16 @@ class ToupBase : public INDI::CCD
         // SDK Version
         ITextVectorProperty m_SDKVersionTP;
         IText m_SDKVersionT;
-		
-		INDI::PropertyNumber  m_ADCDepthNP{1};
+
+        INDI::PropertyNumber  m_ADCDepthNP{1};
 
         // Timeout factor
-        INumberVectorProperty m_TimeoutFactorNP;
-        INumber m_TimeoutFactorN;
+        INDI::PropertyNumber m_TimeoutFactorNP {2};
+        enum
+        {
+            MINIMAL_TIMEOUT,
+            TIMEOUT_FACTOR
+        };
 
         ISwitchVectorProperty m_GainConversionSP;
         ISwitch m_GainConversionS[3];
@@ -303,4 +301,6 @@ class ToupBase : public INDI::CCD
         int32_t m_rgbBufferSize { 0 };
 
         int m_ConfigResolutionIndex {-1};
+
+        INDI::ElapsedTimer m_ExposureTimer;
 };

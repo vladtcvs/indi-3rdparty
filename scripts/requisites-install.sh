@@ -15,7 +15,12 @@ OS=$(uname -s)
 
 case "$OS" in
     Darwin)
-        brew install --overwrite \
+        BREW="/usr/local/bin/brew"
+        if [[ $(uname -m) == "arm64" ]]
+        then
+            BREW="/opt/homebrew/bin/brew"
+        fi
+        $BREW install --overwrite \
             git \
             cfitsio libnova libusb curl \
             gsl jpeg fftw \
@@ -32,7 +37,7 @@ case "$OS" in
                 $(command -v sudo) apt-get install -y \
                     git \
                     cmake build-essential zlib1g-dev \
-                    libcfitsio-dev libnova-dev libusb-1.0-0-dev libcurl4-gnutls-dev \
+                    libcfitsio-dev libnova-dev libahp-gt libahp-xc libusb-1.0-0-dev libcurl4-gnutls-dev \
                     libgsl-dev libjpeg-dev libfftw3-dev libczmq-dev \
                     \
                     libftdi1-dev libavcodec-dev libavdevice-dev libavformat-dev libswscale-dev \
@@ -46,7 +51,7 @@ case "$OS" in
                 $(command -v sudo) dnf install -y \
                     git \
                     cmake gcc-c++ zlib-devel \
-                    cfitsio-devel libnova-devel libusb-devel libcurl-devel \
+                    cfitsio-devel libnova-devel libahp-gt libahp-xc libusb-devel libcurl-devel \
                     gsl-devel libjpeg-devel fftw-devel opencv-devel zeromq-devel \
                     \
                     https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm \

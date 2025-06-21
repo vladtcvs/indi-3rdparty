@@ -7,6 +7,8 @@ project (libasi)
 # Using ASI EAF SDK Version 1.6 updated on 2023-03-16
 # Using ASI CAA SDK Version 1.0 updated on 2025-01-09
 
+option(INDI_INSTALL_UDEV_RULES "Install UDEV rules" On)
+
 set (ASICAM_VERSION "1.37")
 set (ASICAM_SOVERSION "1")
 
@@ -45,11 +47,13 @@ if (APPLE)
   set_property (TARGET EFWFilter   PROPERTY IMPORTED_LOCATION "mac/libEFWFilter.bin")
   set_property (TARGET USB2ST4Conv PROPERTY IMPORTED_LOCATION "mac/libUSB2ST4Conv.bin")
   set_property (TARGET EAFFocuser  PROPERTY IMPORTED_LOCATION "mac/libEAFFocuser.bin")
+  set_property (TARGET CAARotator  PROPERTY IMPORTED_LOCATION "mac/libCAARotator.bin")
 
   FIX_MACOS_LIBRARIES("libASICamera2" "mac/libASICamera2.bin" "ASI/ZWO")
   FIX_MACOS_LIBRARIES("libEFWFilter" "mac/libEFWFilter.bin" "ASI/ZWO")
   FIX_MACOS_LIBRARIES("libUSB2ST4Conv" "mac/libUSB2ST4Conv.bin" "ASI/ZWO")
   FIX_MACOS_LIBRARIES("libEAFFocuser" "mac/libEAFFocuser.bin" "ASI/ZWO")
+  FIX_MACOS_LIBRARIES("libCAARotator" "mac/libCAARotator.bin" "ASI/ZWO")
 
 elseif (UNIX AND NOT WIN32)
 
@@ -80,8 +84,10 @@ elseif (UNIX AND NOT WIN32)
   endif ()
 
   # Install udev rules
-  set (UDEVRULES_INSTALL_DIR "/lib/udev/rules.d" CACHE STRING "Base directory for udev rules")
-  install (FILES ${CMAKE_CURRENT_SOURCE_DIR}/99-asi.rules DESTINATION ${UDEVRULES_INSTALL_DIR})
+  if (INDI_INSTALL_UDEV_RULES)
+    set (UDEVRULES_INSTALL_DIR "/lib/udev/rules.d" CACHE STRING "Base directory for udev rules")
+    install (FILES ${CMAKE_CURRENT_SOURCE_DIR}/99-asi.rules DESTINATION ${UDEVRULES_INSTALL_DIR})
+  endif ()
 
 endif ()
 

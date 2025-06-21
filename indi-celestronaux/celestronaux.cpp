@@ -41,6 +41,8 @@
 
 using namespace INDI::AlignmentSubsystem;
 
+static constexpr double MIN_TRACK_RATE_FACTOR = 0.1; // Factor to ensure track rate doesn't go below a certain threshold of predicted rate
+
 static std::unique_ptr<CelestronAUX> telescope_caux(new CelestronAUX());
 
 double anglediff(double a, double b)
@@ -177,6 +179,39 @@ bool CelestronAUX::Handshake()
         getGuideRate(AZM);
         getGuideRate(ALT);
 
+        // Initialize PID Tuners if in Alt-Az mode
+        if (m_MountType == ALT_AZ)
+        {
+            double dt = getPollingPeriod() / 1000.0;
+            // Default reference model: omega_n = 0.5 rad/s, zeta = 1.0 (critically damped)
+            // These values might need tuning based on mount characteristics.
+            double ref_omega_n = 0.5;
+            double ref_zeta    = 1.0;
+
+            m_az_pid_tuner = std::make_unique<AdaptivePIDTuner>(dt, Axis1PIDNP[Propotional].getValue(),
+                             Axis1PIDNP[Integral].getValue(),
+                             Axis1PIDNP[Derivative].getValue(),
+                             ref_omega_n, ref_zeta);
+            // Set some reasonable gain limits and step sizes
+            m_az_pid_tuner->setGainLimits(0, 500, 0, 500, 0, 500); // Kp, Ki, Kd limits
+            m_az_pid_tuner->setAdaptationStepSizes(0.05, 0.005, 0.005); // Kp, Ki, Kd steps
+            m_az_pid_tuner->setHistorySize(100); // Approx 10s of data at 10Hz
+
+            m_al_pid_tuner = std::make_unique<AdaptivePIDTuner>(dt, Axis2PIDNP[Propotional].getValue(),
+                             Axis2PIDNP[Integral].getValue(),
+                             Axis2PIDNP[Derivative].getValue(),
+                             ref_omega_n, ref_zeta);
+            m_al_pid_tuner->setGainLimits(0, 500, 0, 100, 0, 100); // Kp, Ki, Kd limits for AL
+            m_al_pid_tuner->setAdaptationStepSizes(0.05, 0.005, 0.005);
+            m_al_pid_tuner->setHistorySize(100);
+
+            // Start tuning if enabled in config
+            if (AdaptiveTuningAzSP[INDI_ENABLED].s == ISS_ON)
+                m_az_pid_tuner->startActiveTuning();
+            if (AdaptiveTuningAlSP[INDI_ENABLED].s == ISS_ON)
+                m_al_pid_tuner->startActiveTuning();
+        }
+
         return true;
     }
     else
@@ -232,6 +267,7 @@ bool CelestronAUX::initProperties()
     if (strstr(getDeviceName(), "CGX") ||
             strstr(getDeviceName(), "CGEM") ||
             strstr(getDeviceName(), "Advanced VX") ||
+            strstr(getDeviceName(), "Advanced GT") ||
             strstr(getDeviceName(), "Wedge"))
     {
         // Force equatorial for such mounts
@@ -340,19 +376,19 @@ bool CelestronAUX::initProperties()
     FI::initProperties(FOCUS_TAB);
 
     // override some default initialization values
-    FocusMaxPosN[0].max   = 60000;
-    FocusMaxPosN[0].min   = 0;
-    FocusMaxPosN[0].value = 0;
-    FocusMaxPosNP.p = IP_RO;
-    FocusMaxPosNP.timeout = 0;
-    FocusMaxPosNP.s = IPS_IDLE;
+    FocusMaxPosNP[0].setMax(60000);
+    FocusMaxPosNP[0].setMin(0);
+    FocusMaxPosNP[0].setValue(0);
+    FocusMaxPosNP.setPermission(IP_RO);
+    FocusMaxPosNP.setTimeout(0);
+    FocusMaxPosNP.setState(IPS_IDLE);
 
-    FocusAbsPosNP.s = IPS_IDLE;
+    FocusAbsPosNP.setState(IPS_IDLE);
 
-    FocusBacklashN[0].min = 0;
-    FocusBacklashN[0].max = 1000;
-    FocusBacklashN[0].step = 1;
-    FocusBacklashN[0].value = 0;
+    FocusBacklashNP[0].setMin(0);
+    FocusBacklashNP[0].setMax(1000);
+    FocusBacklashNP[0].setStep(1);
+    FocusBacklashNP[0].setValue(0);
 
 
     /////////////////////////////////////////////////////////////////////////////////////
@@ -386,6 +422,17 @@ bool CelestronAUX::initProperties()
     Axis2PIDNP[Derivative].fill("Derivative", "Derivative", "%.2f", 0, 100, 10, 0);
     Axis2PIDNP[Integral].fill("Integral", "Integral", "%.2f", 0, 100, 10, 1);
     Axis2PIDNP.fill(getDeviceName(), "AXIS2_PID", "Axis2 PID", MOUNTINFO_TAB, IP_RW, 60, IPS_IDLE);
+
+    // Adaptive PID Tuning Toggles
+    AdaptiveTuningAzSP[INDI_ENABLED].fill("ADAPTIVE_AZ_ENABLE", "Enabled", ISS_OFF);
+    AdaptiveTuningAzSP[INDI_DISABLED].fill("ADAPTIVE_AZ_DISABLE", "Disabled", ISS_ON);
+    AdaptiveTuningAzSP.fill(getDeviceName(), "ADAPTIVE_TUNING_AZ", "Adaptive Tuning AZ", MOUNTINFO_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+    AdaptiveTuningAzSP.load();
+
+    AdaptiveTuningAlSP[INDI_ENABLED].fill("ADAPTIVE_AL_ENABLE", "Enabled", ISS_OFF);
+    AdaptiveTuningAlSP[INDI_DISABLED].fill("ADAPTIVE_AL_DISABLE", "Disabled", ISS_ON);
+    AdaptiveTuningAlSP.fill(getDeviceName(), "ADAPTIVE_TUNING_AL", "Adaptive Tuning AL", MOUNTINFO_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+    AdaptiveTuningAlSP.load();
 
     // Firmware Info
     FirmwareTP[FW_MODEL].fill("Model", "", nullptr);
@@ -539,6 +586,8 @@ bool CelestronAUX::updateProperties()
         {
             defineProperty(Axis1PIDNP);
             defineProperty(Axis2PIDNP);
+            defineProperty(AdaptiveTuningAzSP);
+            defineProperty(AdaptiveTuningAlSP);
         }
 
         getModel(AZM);
@@ -587,19 +636,19 @@ bool CelestronAUX::updateProperties()
 
                 LOGF_DEBUG("Received focuser calibration limits: max %i, min %i", m_FocusLimitMax, m_FocusLimitMin);
 
-                FocusMaxPosN->value = m_FocusLimitMax - m_FocusLimitMin;
-                FocusMaxPosNP.s = IPS_OK;
+                FocusMaxPosNP[0].setValue(m_FocusLimitMax - m_FocusLimitMin);
+                FocusMaxPosNP.setState(IPS_OK);
 
-                FocusAbsPosN->max = FocusMaxPosN->value;
-                IUUpdateMinMax(&FocusAbsPosNP);
+                FocusAbsPosNP[0].setMax(FocusMaxPosNP[0].getValue());
+                FocusAbsPosNP.updateMinMax();
 
                 FI::SetCapability(FOCUSER_CAN_ABS_MOVE | FOCUSER_CAN_REL_MOVE | FOCUSER_CAN_ABORT );
                 setDriverInterface(getDriverInterface() | FOCUSER_INTERFACE);
                 syncDriverInfo();
 
                 getFocusPosition();
-                FocusAbsPosN->value = m_FocusLimitMax - m_FocusPosition;
-                FocusAbsPosNP.s = IPS_OK;
+                FocusAbsPosNP[0].setValue(m_FocusLimitMax - m_FocusPosition);
+                FocusAbsPosNP.setState(IPS_OK);
 
                 m_FocusEnabled = true;
                 LOG_INFO("AUX focuser enabled");
@@ -616,8 +665,8 @@ bool CelestronAUX::updateProperties()
                 // FocusMinPosNP.setState(IPS_ALERT);
                 // defineProperty(FocusMinPosNP);
 
-                FocusMaxPosN->value = FocusMaxPosN->max;
-                FocusMaxPosNP.s = IPS_ALERT;
+                FocusMaxPosNP[0].setValue(FocusMaxPosNP[0].getMax());
+                FocusMaxPosNP.setState(IPS_ALERT);
 
                 m_FocusEnabled = false;
                 LOG_INFO("AUX focuser disabled");
@@ -627,9 +676,6 @@ bool CelestronAUX::updateProperties()
             FI::updateProperties();
 
         }
-
-
-
 
         // When no HC is attached, the following three commands needs to be send
         // to the motor controller (MC): MC_SET_POSITION, MC_SET_CORDWRAP_POSITION
@@ -676,36 +722,38 @@ bool CelestronAUX::updateProperties()
     {
         //deleteProperty(MountTypeSP.getName());
         if (m_MountType == ALT_AZ)
-            deleteProperty(HorizontalCoordsNP.getName());
-        deleteProperty(HomeSP.getName());
+            deleteProperty(HorizontalCoordsNP);
+        deleteProperty(HomeSP);
 
         GI::updateProperties();
-        deleteProperty(GuideRateNP.getName());
+        deleteProperty(GuideRateNP);
 
         if (m_MountType == ALT_AZ)
         {
-            deleteProperty(CordWrapToggleSP.getName());
-            deleteProperty(CordWrapPositionSP.getName());
-            deleteProperty(CordWrapBaseSP.getName());
+            deleteProperty(CordWrapToggleSP);
+            deleteProperty(CordWrapPositionSP);
+            deleteProperty(CordWrapBaseSP);
         }
 
         // Slew limits
-        deleteProperty(Axis1LimitToggleSP.getName());
-        deleteProperty(Axis2LimitToggleSP.getName());
-        deleteProperty(SlewLimitPositionNP.getName());
+        deleteProperty(Axis1LimitToggleSP);
+        deleteProperty(Axis2LimitToggleSP);
+        deleteProperty(SlewLimitPositionNP);
 
-        deleteProperty(GPSEmuSP.getName());
+        deleteProperty(GPSEmuSP);
 
-        deleteProperty(EncoderNP.getName());
-        deleteProperty(AngleNP.getName());
+        deleteProperty(EncoderNP);
+        deleteProperty(AngleNP);
 
         if (m_MountType == ALT_AZ)
         {
-            deleteProperty(Axis1PIDNP.getName());
-            deleteProperty(Axis2PIDNP.getName());
+            deleteProperty(Axis1PIDNP);
+            deleteProperty(Axis2PIDNP);
+            deleteProperty(AdaptiveTuningAzSP);
+            deleteProperty(AdaptiveTuningAlSP);
         }
 
-        deleteProperty(FirmwareTP.getName());
+        deleteProperty(FirmwareTP);
 
         FI::updateProperties();
     }
@@ -736,6 +784,8 @@ bool CelestronAUX::saveConfigItems(FILE *fp)
     {
         Axis1PIDNP.save(fp);
         Axis2PIDNP.save(fp);
+        AdaptiveTuningAzSP.save(fp);
+        AdaptiveTuningAlSP.save(fp);
     }
     return true;
 }
@@ -1056,6 +1106,42 @@ bool CelestronAUX::ISNewSwitch(const char *dev, const char *name, ISState *state
             return true;
         }
 
+        // Adaptive Tuning AZ
+        if (AdaptiveTuningAzSP.isNameMatch(name))
+        {
+            AdaptiveTuningAzSP.update(states, names, n);
+            if (m_az_pid_tuner)
+            {
+                if (AdaptiveTuningAzSP[INDI_ENABLED].s == ISS_ON)
+                    m_az_pid_tuner->startActiveTuning();
+                else
+                    m_az_pid_tuner->stopActiveTuning();
+                AdaptiveTuningAzSP.setState(IPS_OK);
+            }
+            else
+                AdaptiveTuningAzSP.setState(IPS_ALERT);
+            AdaptiveTuningAzSP.apply();
+            return true;
+        }
+
+        // Adaptive Tuning AL
+        if (AdaptiveTuningAlSP.isNameMatch(name))
+        {
+            AdaptiveTuningAlSP.update(states, names, n);
+            if (m_al_pid_tuner)
+            {
+                if (AdaptiveTuningAlSP[INDI_ENABLED].s == ISS_ON)
+                    m_al_pid_tuner->startActiveTuning();
+                else
+                    m_al_pid_tuner->stopActiveTuning();
+                AdaptiveTuningAlSP.setState(IPS_OK);
+            }
+            else
+                AdaptiveTuningAlSP.setState(IPS_ALERT);
+            AdaptiveTuningAlSP.apply();
+            return true;
+        }
+
         // Process alignment properties
         ProcessAlignmentSwitchProperties(this, name, states, names, n);
 
@@ -1316,7 +1402,7 @@ bool CelestronAUX::AbortFocuser()
 IPState CelestronAUX::MoveRelFocuser(FocusDirection dir, uint32_t ticks)
 {
 
-    return MoveAbsFocuser(dir == FOCUS_OUTWARD ? FocusAbsPosN->value + ticks : FocusAbsPosN->value - ticks);
+    return MoveAbsFocuser(dir == FOCUS_OUTWARD ? FocusAbsPosNP[0].getValue() + ticks : FocusAbsPosNP[0].getValue() - ticks);
 
 }
 
@@ -1355,6 +1441,22 @@ void CelestronAUX::resetTracking()
     m_Controllers[AXIS_ALT].reset(new PID(getPollingPeriod() / 1000.0, 10000, -10000, Axis2PIDNP[Propotional].getValue(),
                                           Axis2PIDNP[Derivative].getValue(), Axis2PIDNP[Integral].getValue()));
     m_Controllers[AXIS_ALT]->setIntegratorLimits(-10000, 10000);
+
+    if (m_az_pid_tuner)
+    {
+        m_az_pid_tuner->reset();
+        m_Controllers[AXIS_AZ]->setKp(Axis1PIDNP[Propotional].getValue());
+        m_Controllers[AXIS_AZ]->setKi(Axis1PIDNP[Integral].getValue());
+        m_Controllers[AXIS_AZ]->setKd(Axis1PIDNP[Derivative].getValue());
+    }
+    if (m_al_pid_tuner)
+    {
+        m_al_pid_tuner->reset();
+        m_Controllers[AXIS_ALT]->setKp(Axis2PIDNP[Propotional].getValue());
+        m_Controllers[AXIS_ALT]->setKi(Axis2PIDNP[Integral].getValue());
+        m_Controllers[AXIS_ALT]->setKd(Axis2PIDNP[Derivative].getValue());
+    }
+
     m_TrackingElapsedTimer.restart();
     m_GuideOffset[AXIS_AZ] = m_GuideOffset[AXIS_ALT] = 0;
 }
@@ -1964,14 +2066,40 @@ void CelestronAUX::TimerHit()
 
                 // Only apply tracking IF we're still on the same side of the curve
                 // If we switch over, let's settle for a bit
-                // This seems to not be required. To be removed after extensive testing
-                // if (m_LastOffset[AXIS_AZ] * offsetSteps[AXIS_AZ] >= 0 || m_OffsetSwitchSettle[AXIS_AZ]++ > 3)
+                /// AZ tracking
                 {
-                    m_OffsetSwitchSettle[AXIS_AZ] = 0;
+                    if (m_az_pid_tuner && m_MountType == ALT_AZ) // Only for AltAz
+                    {
+                        double current_az_encoder = EncoderNP[AXIS_AZ].getValue();
+                        // Use the target that includes guide offsets for the reference model input
+                        double target_az_for_model = DegreesToEncoders(AzimuthToDegrees(targetMountAxisCoordinates.azimuth));
+                        m_az_pid_tuner->processMeasurement(target_az_for_model, current_az_encoder);
+
+                        if (m_az_pid_tuner->isActivelyTuning())
+                        {
+                            double newKp, newKi, newKd;
+                            m_az_pid_tuner->getAdaptedGains(newKp, newKi, newKd);
+                            m_Controllers[AXIS_AZ]->setKp(newKp);
+                            m_Controllers[AXIS_AZ]->setKi(newKi);
+                            m_Controllers[AXIS_AZ]->setKd(newKd);
+                            // Optionally update Axis1PIDNP if you want to see live values in client
+                            // Axis1PIDNP[Propotional].setValue(newKp);
+                            // Axis1PIDNP[Integral].setValue(newKi);
+                            // Axis1PIDNP[Derivative].setValue(newKd);
+                            // defineProperty(Axis1PIDNP); // Be careful with frequent updates
+                        }
+                    }
+
+                    m_OffsetSwitchSettle[AXIS_AZ] = 0; // Reset settle counter as in Skywatcher
                     m_LastOffset[AXIS_AZ] = offsetSteps[AXIS_AZ];
                     targetSteps[AXIS_AZ] = DegreesToEncoders(AzimuthToDegrees(targetMountAxisCoordinates.azimuth));
                     // Track rate: predicted + PID controlled correction based on tracking error: offsetSteps
                     trackRates[AXIS_AZ] = predRate[AXIS_AZ] + m_Controllers[AXIS_AZ]->calculate(0, -offsetSteps[AXIS_AZ]);
+
+                    // Apply minTrackRate logic from Skywatcher
+                    double minAzTrackRate = predRate[AXIS_AZ] * MIN_TRACK_RATE_FACTOR;
+                    if (trackRates[AXIS_AZ] * predRate[AXIS_AZ] < 0 || std::abs(trackRates[AXIS_AZ]) < std::abs(minAzTrackRate))
+                        trackRates[AXIS_AZ] = minAzTrackRate;
 
                     LOGF_DEBUG("Predicted AZ Rate: %8.2f", predRate[AXIS_AZ]);
                     LOGF_DEBUG("Tracking AZ Now: %8.f Target: %8d Offset: %8d Rate: %8.2f", EncoderNP[AXIS_AZ].getValue(), targetSteps[AXIS_AZ],
@@ -1985,19 +2113,42 @@ void CelestronAUX::TimerHit()
 #endif
 
                     // Set the tracking rate
-                    trackByRate(AXIS_AZ, trackRates[AXIS_AZ]);
+                    trackByRate(AXIS_AZ, static_cast<int32_t>(trackRates[AXIS_AZ]));
                 }
 
-                // Only apply tracking IF we're still on the same side of the curve
-                // If we switch over, let's settle for a bit
-                // This seems to not be required. To be removed after extensive testing
-                // if (m_LastOffset[AXIS_ALT] * offsetSteps[AXIS_ALT] >= 0 || m_OffsetSwitchSettle[AXIS_ALT]++ > 3)
+                /// Alt tracking
                 {
-                    m_OffsetSwitchSettle[AXIS_ALT] = 0;
+                    if (m_al_pid_tuner && m_MountType == ALT_AZ) // Only for AltAz
+                    {
+                        double current_al_encoder = EncoderNP[AXIS_ALT].getValue();
+                        // Use the target that includes guide offsets for the reference model input
+                        double target_al_for_model = DegreesToEncoders(targetMountAxisCoordinates.altitude);
+                        m_al_pid_tuner->processMeasurement(target_al_for_model, current_al_encoder);
+
+                        if (m_al_pid_tuner->isActivelyTuning())
+                        {
+                            double newKp, newKi, newKd;
+                            m_al_pid_tuner->getAdaptedGains(newKp, newKi, newKd);
+                            m_Controllers[AXIS_ALT]->setKp(newKp);
+                            m_Controllers[AXIS_ALT]->setKi(newKi);
+                            m_Controllers[AXIS_ALT]->setKd(newKd);
+                            // Axis2PIDNP[Propotional].setValue(newKp);
+                            // Axis2PIDNP[Integral].setValue(newKi);
+                            // Axis2PIDNP[Derivative].setValue(newKd);
+                            // defineProperty(Axis2PIDNP);
+                        }
+                    }
+
+                    m_OffsetSwitchSettle[AXIS_ALT] = 0; // Reset settle counter as in Skywatcher
                     m_LastOffset[AXIS_ALT] = offsetSteps[AXIS_ALT];
                     targetSteps[AXIS_ALT]  = DegreesToEncoders(targetMountAxisCoordinates.altitude);
                     // Track rate: predicted + PID controlled correction based on tracking error: offsetSteps
                     trackRates[AXIS_ALT] = predRate[AXIS_ALT] + m_Controllers[AXIS_ALT]->calculate(0, -offsetSteps[AXIS_ALT]);
+
+                    // Apply minTrackRate logic from Skywatcher
+                    double minAlTrackRate = predRate[AXIS_ALT] * MIN_TRACK_RATE_FACTOR;
+                    if (trackRates[AXIS_ALT] * predRate[AXIS_ALT] < 0 || std::abs(trackRates[AXIS_ALT]) < std::abs(minAlTrackRate))
+                        trackRates[AXIS_ALT] = minAlTrackRate;
 
                     LOGF_DEBUG("Predicted AL Rate: %8.2f", predRate[AXIS_ALT]);
                     LOGF_DEBUG("Tracking AL Now: %8.f Target: %8d Offset: %8d Rate: %8.2f", EncoderNP[AXIS_ALT].getValue(),
@@ -2010,7 +2161,7 @@ void CelestronAUX::TimerHit()
                                m_Controllers[AXIS_ALT]->derivativeTerm(),
                                trackRates[AXIS_ALT] - predRate[AXIS_ALT]);
 #endif
-                    trackByRate(AXIS_ALT, trackRates[AXIS_ALT]);
+                    trackByRate(AXIS_ALT, static_cast<int32_t>(trackRates[AXIS_ALT]));
                 }
                 break;
             }
@@ -2045,10 +2196,10 @@ void CelestronAUX::TimerHit()
 
         // update client only if changed to reduce traffic
         uint32_t newFocusAbsPos = m_FocusLimitMax - m_FocusPosition;
-        if (newFocusAbsPos != FocusAbsPosN->value)
+        if (newFocusAbsPos != FocusAbsPosNP[0].getValue())
         {
-            FocusAbsPosN->value = newFocusAbsPos;
-            IDSetNumber(&FocusAbsPosNP, nullptr);
+            FocusAbsPosNP[0].setValue(newFocusAbsPos);
+            FocusAbsPosNP.apply();
         }
 
         if(m_FocusStatus == SLEWING)
@@ -2058,16 +2209,16 @@ void CelestronAUX::TimerHit()
             if (m_FocusStatus == STOPPED)
             {
 
-                if (FocusAbsPosNP.s == IPS_BUSY)
+                if (FocusAbsPosNP.getState() == IPS_BUSY)
                 {
-                    FocusAbsPosNP.s = IPS_OK;
-                    IDSetNumber(&FocusAbsPosNP, nullptr);
+                    FocusAbsPosNP.setState(IPS_OK);
+                    FocusAbsPosNP.apply();
                 }
-                if (FocusRelPosNP.s == IPS_BUSY)
+                if (FocusRelPosNP.getState() == IPS_BUSY)
                 {
-                    FocusRelPosNP.s = IPS_OK;
-                    FocusRelPosN->value = 0;
-                    IDSetNumber(&FocusRelPosNP, nullptr);
+                    FocusRelPosNP.setState(IPS_OK);
+                    FocusRelPosNP[0].setValue(0);
+                    FocusRelPosNP.apply();
                 }
             }
         }

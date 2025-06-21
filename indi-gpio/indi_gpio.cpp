@@ -61,6 +61,14 @@ const char *INDIGPIO::getDefaultName()
     return "GPIO";
 }
 
+#ifdef HAVE_LIBGPIOD_V2
+const gpiod::line::direction INPUT = gpiod::line::direction::INPUT;
+const gpiod::line::direction OUTPUT = gpiod::line::direction::OUTPUT;
+#else
+const auto INPUT = gpiod::line::DIRECTION_INPUT;
+const auto OUTPUT = gpiod::line::DIRECTION_OUTPUT;
+#endif
+
 ////////////////////////////////////////////////////////////////////////////////////////
 ///
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -154,10 +162,6 @@ bool INDIGPIO::updateProperties()
             defineProperty(PWMConfigNP[i]);
             defineProperty(PWMEnableSP[i]);
         }
-
-        // Define pulse duration properties
-        for (size_t i = 0; i < m_OutputOffsets.size(); i++)
-            defineProperty(PulseDurationNP[i]);
     }
     else
     {
@@ -167,10 +171,6 @@ bool INDIGPIO::updateProperties()
             deleteProperty(PWMConfigNP[i]);
             deleteProperty(PWMEnableSP[i]);
         }
-
-        // Delete pulse duration properties
-        for (size_t i = 0; i < m_OutputOffsets.size(); i++)
-            deleteProperty(PulseDurationNP[i]);
     }
 
     return true;
@@ -195,19 +195,36 @@ bool INDIGPIO::Connect()
     }
 
     // Get all lines
+    #ifdef HAVE_LIBGPIOD_V2
+    int lines = m_GPIO->get_info().num_lines();
+    #else
     auto lines = m_GPIO->get_all_lines();
+    #endif
 
     m_InputOffsets.clear();
     m_OutputOffsets.clear();
+
     // Iterate through all lines
+    #ifdef HAVE_LIBGPIOD_V2
+    for (int i=0; i<lines; i++)
+    #else
     for (const auto &line : lines)
+    #endif
     {
+        #ifdef HAVE_LIBGPIOD_V2
+        auto line = m_GPIO->get_line_info(i);
+        #endif
         // Get line direction
         auto name = line.name();
 
         // Skip lines that are used or not GPIO
+        #ifdef HAVE_LIBGPIOD_V2
+        if (line.used() || name.find("GPIO") == std::string::npos)
+            continue;
+        #else
         if (line.is_used() || name.find("GPIO") == std::string::npos)
             continue;
+        #endif
 
         // Skip GPIOs configured for PWM
         bool isPWM = std::any_of(m_PWMPins.begin(), m_PWMPins.end(),
@@ -221,16 +238,18 @@ bool INDIGPIO::Connect()
         auto direction = line.direction();
 
         // Check if line is input or output and add to corresponding vector
-        if (direction == gpiod::line::DIRECTION_INPUT)
+        if (direction == INPUT)
         {
             m_InputOffsets.push_back(line.offset());
         }
-        else if (direction == gpiod::line::DIRECTION_OUTPUT)
+        else if (direction == OUTPUT)
         {
             m_OutputOffsets.push_back(line.offset());
         }
 
+        #ifndef HAVE_LIBGPIOD_V2
         line.release();
+        #endif
     }
 
     // Initialize Inputs. We do not support Analog inputs
@@ -263,21 +282,6 @@ bool INDIGPIO::Connect()
         }
     }
 
-    // Initialize pulse mode properties
-    PulseDurationNP.clear();
-    PulseDurationNP.reserve(m_OutputOffsets.size());
-    for (size_t i = 0; i < m_OutputOffsets.size(); i++)
-    {
-        auto label = "GPIO " + std::to_string(m_OutputOffsets[i]);
-        INDI::PropertyNumber oneDuration {1};
-        oneDuration[0].fill("DURATION", "Duration (ms)", "%.0f", 0, 60000, 100, 0);
-        oneDuration.fill(getDeviceName(), ("PULSE_" + std::to_string(m_OutputOffsets[i])).c_str(),
-                         label.c_str(), "Pulse Mode", IP_RW, 60, IPS_IDLE);
-        oneDuration.load();
-        PulseDurationNP.push_back(std::move(oneDuration));
-    }
-    PulseDurationNP.shrink_to_fit();
-
     SetTimer(getPollingPeriod());
     return true;
 }
@@ -296,7 +300,11 @@ bool INDIGPIO::Disconnect()
         }
     }
 
+    #ifdef HAVE_LIBGPIOD_V2
+    m_GPIO->close();
+    #else
     m_GPIO->reset();
+    #endif
     return true;
 }
 
@@ -320,16 +328,48 @@ bool INDIGPIO::saveConfigItems(FILE *fp)
         PWMEnableSP[i].save(fp);
     }
 
-    // Save pulse durations
-    for (size_t i = 0; i < m_OutputOffsets.size(); i++)
-        PulseDurationNP[i].save(fp);
-
     return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
 ///
 ////////////////////////////////////////////////////////////////////////////////////////
+
+#ifdef HAVE_LIBGPIOD_V2
+bool INDIGPIO::UpdateDigitalInputs()
+{
+    try
+    {
+        for (size_t i = 0; i < m_InputOffsets.size(); i++)
+        {
+            auto oldState = DigitalInputsSP[i].findOnSwitchIndex();
+            auto request = m_GPIO->prepare_request()
+			       .set_consumer("indi-gpio")
+			       .add_line_settings(
+				       m_InputOffsets[i],
+				       ::gpiod::line_settings().set_direction(
+					       ::gpiod::line::direction::INPUT))
+			       .do_request();
+
+            auto newState = request.get_value(m_InputOffsets[i]) == gpiod::line::value::ACTIVE ? 1 : 0;
+ 
+            if (oldState != newState)
+            {
+                DigitalInputsSP[i].reset();
+                DigitalInputsSP[i][newState].setState(ISS_ON);
+                DigitalInputsSP[i].setState(IPS_OK);
+                DigitalInputsSP[i].apply();
+            }
+        }
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Failed to update digital inputs: %s", e.what());
+        return false;
+    }
+    return true;
+}
+#else
 bool INDIGPIO::UpdateDigitalInputs()
 {
     try
@@ -361,6 +401,7 @@ bool INDIGPIO::UpdateDigitalInputs()
     }
     return true;
 }
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////
 ///
@@ -381,6 +422,37 @@ bool INDIGPIO::UpdateDigitalOutputs()
 ////////////////////////////////////////////////////////////////////////////////////////
 ///
 ////////////////////////////////////////////////////////////////////////////////////////
+#ifdef HAVE_LIBGPIOD_V2
+bool INDIGPIO::CommandOutput(uint32_t index, OutputState command)
+{
+    if (index >= m_OutputOffsets.size())
+    {
+        LOGF_ERROR("Invalid output index %d. Valid range from 0 to %d.", m_OutputOffsets.size() - 1);
+        return false;
+    }
+
+    try
+    {
+        auto offset = m_OutputOffsets[index];
+        auto request = m_GPIO->prepare_request()
+			.set_consumer("indi-gpio")
+			.add_line_settings(
+				offset,
+				::gpiod::line_settings().set_direction(
+					::gpiod::line::direction::OUTPUT))
+			.do_request();
+        gpiod::line::value set_val = command == INDI::OutputInterface::OutputState::Off ? gpiod::line::value::INACTIVE : gpiod::line::value::ACTIVE;
+        request.set_value(offset, set_val);
+    }
+    catch (const std::exception &e)
+    {
+        LOGF_ERROR("Failed to toggle digital outputs: %s", e.what());
+        return false;
+    }
+
+    return true;
+}
+#else
 bool INDIGPIO::CommandOutput(uint32_t index, OutputState command)
 {
     if (index >= m_OutputOffsets.size())
@@ -397,24 +469,7 @@ bool INDIGPIO::CommandOutput(uint32_t index, OutputState command)
         config.consumer = "indi-gpio";
         config.request_type = gpiod::line_request::DIRECTION_OUTPUT;
         line.request(config);
-
-        // Get pulse duration
-        int duration = static_cast<int>(PulseDurationNP[index][0].getValue());
-
-        // If pulse mode is enabled (duration > 0)
-        if (duration > 0 && command == OutputState::On)
-        {
-            // Send pulse
-            line.set_value(1);
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
-            line.set_value(0);
-        }
-        else
-        {
-            // Regular operation
-            line.set_value(command);
-        }
-
+        line.set_value(command);
         line.release();
     }
     catch (const std::exception &e)
@@ -422,9 +477,9 @@ bool INDIGPIO::CommandOutput(uint32_t index, OutputState command)
         LOGF_ERROR("Failed to toggle digital outputs: %s", e.what());
         return false;
     }
-
     return true;
 }
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////
 ///
@@ -587,20 +642,8 @@ bool INDIGPIO::ISNewNumber(const char * dev, const char * name, double values[],
             }
         }
 
-        // Handle pulse duration changes
-        for (size_t i = 0; i < m_OutputOffsets.size(); i++)
-        {
-            if (PulseDurationNP[i].isNameMatch(name))
-            {
-                auto previousDuration = PulseDurationNP[i][0].getValue();
-                PulseDurationNP[i].update(values, names, n);
-                PulseDurationNP[i].setState(IPS_OK);
-                PulseDurationNP[i].apply();
-                if (previousDuration != values[0])
-                    saveConfig(PulseDurationNP[i]);
-                return true;
-            }
-        }
+        if (INDI::OutputInterface::processNumber(dev, name, values, names, n))
+            return true;
     }
 
     return INDI::DefaultDevice::ISNewNumber(dev, name, values, names, n);

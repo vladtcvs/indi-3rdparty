@@ -154,8 +154,8 @@ bool MICCD::initProperties()
     INDI::CCD::initProperties();
     INDI::FilterInterface::initProperties(FILTER_TAB);
 
-    FilterSlotN[0].min = 1;
-    FilterSlotN[0].max = numFilters;
+    FilterSlotNP[0].setMin(1);
+    FilterSlotNP[0].setMax(numFilters);
 
     CaptureFormat mono = {"INDI_MONO", "Mono", 16, true};
     addCaptureFormat(mono);
@@ -427,7 +427,7 @@ bool MICCD::setupParams()
     minExpTime = expTime / 1000000.0; // convert to seconds
     PrimaryCCD.setMinMaxStep("CCD_EXPOSURE", "CCD_EXPOSURE_VALUE", minExpTime, 3600, 1, true);
 
-    if (!sim && maxGainValue == 0)
+    if (!sim && maxGainValue <= 0)
     {
         float gain = 0;
         if (gxccd_get_value(cameraHandle, GV_ADC_GAIN, &gain) < 0)
@@ -806,11 +806,9 @@ bool MICCD::ISNewText(const char *dev, const char *name, char *texts[], char *na
 {
     if (strcmp(dev, getDeviceName()) == 0)
     {
-        if (!strcmp(name, FilterNameTP->name))
-        {
-            INDI::FilterInterface::processText(dev, name, texts, names, n);
+        if (INDI::FilterInterface::processText(dev, name, texts, names, n))
             return true;
-        }
+
     }
 
     return INDI::CCD::ISNewText(dev, name, texts, names, n);
@@ -820,11 +818,9 @@ bool MICCD::ISNewNumber(const char *dev, const char *name, double values[], char
 {
     if (strcmp(dev, getDeviceName()) == 0)
     {
-        if (!strcmp(name, FilterSlotNP.name))
-        {
-            INDI::FilterInterface::processNumber(dev, name, values, names, n);
+        if (INDI::FilterInterface::processNumber(dev, name, values, names, n))
             return true;
-        }
+
 
         if (!strcmp(name, FanNP.name))
         {

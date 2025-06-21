@@ -138,6 +138,15 @@ bool ATIKCCD::initProperties()
     IUFillText(&VersionInfoS[VERSION_FIRMWARE], "VERSION_FIRMWARE", "Firmware", "Unknown");
     IUFillTextVector(&VersionInfoSP, VersionInfoS, 2, getDeviceName(), "VERSION", "Version", INFO_TAB, IP_RO, 60, IPS_IDLE);
 
+    // Direct Gain Control
+    IUFillNumber(&GainN[0], "GAIN", "Gain", "%.f", 0, 60, 5, 30);
+    IUFillNumberVector(&GainNP, GainN, 1, getDeviceName(), "CCD_GAIN", "Gain", MAIN_CONTROL_TAB, IP_RW, 60, IPS_IDLE);
+
+    // Direct Offset Control
+    IUFillNumber(&OffsetN[0], "OFFSET", "Offset", "%.f", 0, 511, 10, 0);
+    IUFillNumberVector(&OffsetNP, OffsetN, 1, getDeviceName(), "CCD_OFFSET", "Offset", MAIN_CONTROL_TAB, IP_RW, 60,
+                       IPS_IDLE);
+
     // Gain/Offset Presets
     IUFillSwitch(&ControlPresetsS[PRESET_CUSTOM], "PRESET_CUSTOM", "Custom", ISS_OFF);
     IUFillSwitch(&ControlPresetsS[PRESET_LOW], "PRESET_LOW", "Low", ISS_OFF);
@@ -216,6 +225,8 @@ bool ATIKCCD::updateProperties()
         {
             defineProperty(&ControlPresetsSP);
             loadConfig(true, "CCD_CONTROL_PRESETS");
+            defineProperty(&GainNP);
+            defineProperty(&OffsetNP);
             defineProperty(&ControlNP);
             if (ControlPresetsS[0].s == ISS_ON)
                 loadConfig(true, "CCD_CONTROLS");
@@ -248,6 +259,8 @@ bool ATIKCCD::updateProperties()
         if (m_isHorizon)
         {
             deleteProperty(ControlPresetsSP.name);
+            deleteProperty(GainNP.name);
+            deleteProperty(OffsetNP.name);
             deleteProperty(ControlNP.name);
             deleteProperty(PadDataSP.name);
             deleteProperty(EvenIlluminationSP.name);
@@ -394,8 +407,8 @@ bool ATIKCCD::setupParams()
             setDriverInterface(getDriverInterface() | FILTER_INTERFACE);
             syncDriverInfo();
 
-            FilterSlotN[0].min = 1;
-            FilterSlotN[0].max = numFilters;
+            FilterSlotNP[0].setMin(1);
+            FilterSlotNP[0].setMax(numFilters);
 
             LOGF_INFO("Detected %d-position internal filter wheel.", numFilters);
         }
@@ -551,11 +564,16 @@ void ATIKCCD::updateGainOffset()
         ControlN[0].max = static_cast <double> (maxGain);
         ControlN[0].value = static_cast <double> (valGain);
         ControlNP.s = IPS_OK;
+        GainN[0].min = static_cast <double> (minGain);
+        GainN[0].max = static_cast <double> (maxGain);
+        GainN[0].value = static_cast <double> (valGain);
+        GainNP.s = IPS_OK;
     }
     else
     {
         LOG_ERROR("Failed reading Custom Gain.");
         ControlNP.s = IPS_ALERT;
+        GainNP.s = IPS_ALERT;
     }
 
     if (ARTEMIS_OK == ArtemisCameraSpecificOptionGetData(hCam, ID_AtikHorizonGOCustomOffset, data, 6, &len))
@@ -569,11 +587,16 @@ void ATIKCCD::updateGainOffset()
         ControlN[1].max = static_cast <double> (maxOffset);
         ControlN[1].value = static_cast <double> (valOffset);
         ControlNP.s = IPS_OK;
+        OffsetN[0].min = static_cast <double> (minOffset);
+        OffsetN[0].max = static_cast <double> (maxOffset);
+        OffsetN[0].value = static_cast <double> (valOffset);
+        OffsetNP.s = IPS_OK;
     }
     else
     {
         LOG_ERROR("Failed reading Custom Offset.");
         ControlNP.s = IPS_ALERT;
+        OffsetNP.s = IPS_ALERT;
     }
 
     // Then if a Preset other than Custom is used, read the associated values
@@ -596,21 +619,25 @@ void ATIKCCD::updateGainOffset()
                            preset_index, data[0], data[1], data[2], data[3], data[4], data[5], valGain, valOffset);
                 ControlN[0].value = static_cast <double> (valGain);
                 ControlN[1].value = static_cast <double> (valOffset);
+                GainN[0].value = static_cast <double> (valGain);
+                OffsetN[0].value = static_cast <double> (valOffset);
             }
             else
             {
                 LOGF_WARN("Failed reading Preset #%d Gain/Offset.", preset_index);
-                ControlNP.s = IPS_ALERT;
+                ControlPresetsSP.s = IPS_ALERT;
             }
         }
         else
         {
             LOGF_WARN("Failed reading Preset #%d Gain/Offset, incorrect preset index.", preset_index);
-            ControlNP.s = IPS_ALERT;
+            ControlPresetsSP.s = IPS_ALERT;
         }
     }
 
     IDSetNumber(&ControlNP, nullptr);
+    IDSetNumber(&GainNP, nullptr);
+    IDSetNumber(&OffsetNP, nullptr);
 }
 
 bool ATIKCCD::Disconnect()
@@ -646,11 +673,9 @@ bool ATIKCCD::ISNewText(const char *dev, const char *name, char *texts[], char *
 {
     if (dev != nullptr && !strcmp(dev, getDeviceName()))
     {
-        if (strcmp(name, FilterNameTP->name) == 0)
-        {
-            INDI::FilterInterface::processText(dev, name, texts, names, n);
+        if (INDI::FilterInterface::processText(dev, name, texts, names, n))
             return true;
-        }
+
     }
 
     return INDI::CCD::ISNewText(dev, name, texts, names, n);
@@ -660,71 +685,162 @@ bool ATIKCCD::ISNewNumber(const char *dev, const char *name, double values[], ch
 {
     if (dev != nullptr && !strcmp(dev, getDeviceName()))
     {
-        if (!strcmp(name, FilterSlotNP.name))
-        {
-            INDI::FilterInterface::processNumber(dev, name, values, names, n);
+        if (INDI::FilterInterface::processNumber(dev, name, values, names, n))
             return true;
-        }
-        else if (!strcmp(name, ControlNP.name))
+
+        if (!strcmp(name, ControlNP.name) || !strcmp(name, GainNP.name) || !strcmp(name, OffsetNP.name))
         {
             bool changed = false;
 
-            std::vector<double> oldValues;
-            for (int i = 0; i < ControlNP.nnp; i++)
-                oldValues.push_back(ControlN[i].value);
-
-            if (IUUpdateNumber(&ControlNP, values, names, n) < 0)
+            if (!strcmp(name, ControlNP.name))
             {
-                ControlNP.s = IPS_ALERT;
-                IDSetNumber(&ControlNP, nullptr);
-                return true;
-            }
+                std::vector<double> oldValues;
+                for (int i = 0; i < ControlNP.nnp; i++)
+                    oldValues.push_back(ControlN[i].value);
 
-            ControlNP.s = IPS_OK;
-
-            // Gain - the value is persistent in the camera
-            if (ControlN[0].value != oldValues[0])
-            {
-                uint16_t value = static_cast<uint16_t>(ControlN[0].value);
-                if (ARTEMIS_OK != ArtemisCameraSpecificOptionSetData(hCam, ID_AtikHorizonGOCustomGain, reinterpret_cast<uint8_t*>(&value),
-                        2))
+                if (IUUpdateNumber(&ControlNP, values, names, n) < 0)
                 {
-                    IDLog("Failed setting custom gain at %d", value);
                     ControlNP.s = IPS_ALERT;
+                    IDSetNumber(&ControlNP, nullptr);
                 }
-                else changed = true;
-            }
-
-            // Offset - the value is persistent in the camera
-            if (ControlN[1].value != oldValues[1])
-            {
-                uint16_t value = static_cast<uint16_t>(ControlN[1].value);
-                if (ARTEMIS_OK != ArtemisCameraSpecificOptionSetData(hCam, ID_AtikHorizonGOCustomOffset, reinterpret_cast<uint8_t*>(&value),
-                        2))
+                else
                 {
-                    IDLog("Failed setting custom offset at %d", value);
-                    ControlNP.s = IPS_ALERT;
-                }
-                else changed = true;
-            }
+                    // Gain - the value is persistent in the camera
+                    if (1 <= n && ControlN[0].value != oldValues[0])
+                    {
+                        uint16_t value = static_cast<uint16_t>(ControlN[0].value);
+                        if (ARTEMIS_OK != ArtemisCameraSpecificOptionSetData(hCam, ID_AtikHorizonGOCustomGain,
+                                                                             reinterpret_cast<uint8_t *>(&value), 2))
+                        {
+                            IDLog("Failed setting CCD_CONTROL custom gain at %d", value);
+                            ControlN[0].value = oldValues[0];
+                            ControlNP.s = IPS_ALERT;
+                            IDSetNumber(&ControlNP, nullptr);
+                        }
+                        else
+                        {
+                            GainN[0].value = ControlN[0].value;
+                            GainNP.s = IPS_OK;
+                            IDSetNumber(&GainNP, nullptr);
 
-            IDSetNumber(&ControlNP, nullptr);
+                            ControlNP.s = IPS_OK;
+                            IDSetNumber(&ControlNP, nullptr);
+
+                            changed = true;
+                        }
+                    }
+                    
+                    // Offset - the value is persistent in the camera
+                    if (2 <= n && ControlN[1].value != oldValues[1])
+                    {
+                        uint16_t value = static_cast<uint16_t>(ControlN[1].value);
+                        if (ARTEMIS_OK != ArtemisCameraSpecificOptionSetData(hCam, ID_AtikHorizonGOCustomOffset,
+                                                                             reinterpret_cast<uint8_t *>(&value), 2))
+                        {
+                            IDLog("Failed setting CCD_CONTROL custom offset at %d", value);
+                            ControlN[1].value = oldValues[1];
+                            ControlNP.s = IPS_ALERT;
+                            IDSetNumber(&ControlNP, nullptr);
+                        }
+                        else
+                        {
+                            OffsetN[0].value = ControlN[1].value;
+                            OffsetNP.s = IPS_OK;
+                            IDSetNumber(&ControlNP, nullptr);
+
+                            ControlNP.s = IPS_OK;
+                            IDSetNumber(&OffsetNP, nullptr);
+
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            else if (!strcmp(name, GainNP.name))
+            {
+                auto const oldValue = GainN[0].value;
+
+                if (IUUpdateNumber(&GainNP, values, names, n) < 0)
+                {
+                    GainNP.s = IPS_ALERT;
+                    IDSetNumber(&GainNP, nullptr);
+                    return true;
+                }
+                // Gain - the value is persistent in the camera
+                else if (GainN[0].value != oldValue)
+                {
+                    uint16_t value = static_cast<uint16_t>(GainN[0].value);
+                    if (ARTEMIS_OK != ArtemisCameraSpecificOptionSetData(hCam, ID_AtikHorizonGOCustomGain,
+                                                                         reinterpret_cast<uint8_t *>(&value), 2))
+                    {
+                        IDLog("Failed setting custom gain at %d", value);
+                        GainN[0].value = oldValue;
+                        GainNP.s = IPS_ALERT;
+                        IDSetNumber(&GainNP, nullptr);
+                    }
+                    else
+                    {
+                        GainNP.s = IPS_OK;
+                        IDSetNumber(&GainNP, nullptr);
+                        
+                        ControlN[0].value = GainN[0].value;
+                        ControlNP.s = IPS_OK;
+                        IDSetNumber(&ControlNP, nullptr);
+                        
+                        changed = true;
+                    }
+                }
+            }
+            else if (!strcmp(name, OffsetNP.name))
+            {
+                auto const oldValue = OffsetN[0].value;
+
+                if (IUUpdateNumber(&OffsetNP, values, names, n) < 0)
+                {
+                    OffsetNP.s = IPS_ALERT;
+                    IDSetNumber(&OffsetNP, nullptr);
+                }
+                // Offset - the value is persistent in the camera
+                else if (OffsetN[0].value != ControlN[1].value)
+                {
+                    uint16_t value = static_cast<uint16_t>(OffsetN[0].value);
+                    if (ARTEMIS_OK != ArtemisCameraSpecificOptionSetData(hCam, ID_AtikHorizonGOCustomOffset,
+                                                                         reinterpret_cast<uint8_t *>(&value), 2))
+                    {
+                        IDLog("Failed setting custom offset at %d", value);
+                        OffsetN[0].value = oldValue;
+                        OffsetNP.s = IPS_ALERT;
+                        IDSetNumber(&OffsetNP, nullptr);
+                    }
+                    else
+                    {
+                        OffsetNP.s = IPS_OK;
+                        IDSetNumber(&OffsetNP, nullptr);
+
+                        ControlN[1].value = OffsetN[0].value;
+                        ControlNP.s = IPS_OK;
+                        IDSetNumber(&ControlNP, nullptr);
+
+                        changed = true;
+                    }
+                }
+            }
 
             if (changed)
             {
                 uint16_t value = 0;
                 uint8_t *data = reinterpret_cast<uint8_t*>(&value);
                 LOG_INFO("Gain/Offset modified, automatically switching to Custom Preset.");
-                if (ARTEMIS_OK == ArtemisCameraSpecificOptionSetData(hCam, ID_AtikHorizonGOPresetMode, data, 2))
+                if (ARTEMIS_OK != ArtemisCameraSpecificOptionSetData(hCam, ID_AtikHorizonGOPresetMode, data, 2))
+                {
+                    LOG_ERROR("Failed setting gain/offset preset to Custom.");
+                    ControlPresetsSP.s = IPS_ALERT;
+                }
+                else
                 {
                     IUResetSwitch(&ControlPresetsSP);
                     ControlPresetsS[0].s = ISS_ON; // Set custom
                     ControlPresetsSP.s = IPS_OK;
-                }
-                else
-                {
-                    LOG_ERROR("Failed setting gain/offset preset to Custom.");
-                    ControlPresetsSP.s = IPS_ALERT;
                 }
 
                 IDSetSwitch(&ControlPresetsSP, nullptr);
@@ -1209,7 +1325,7 @@ void ATIKCCD::TimerHit()
     }
 
     // If filter wheel is in motion
-    if (FilterSlotNP.s == IPS_BUSY)
+    if (FilterSlotNP.getState() == IPS_BUSY)
     {
         int numFilters, moving, currentPos, targetPos;
         pthread_mutex_lock(&accessMutex);
@@ -1543,7 +1659,7 @@ bool ATIKCCD::saveConfigItems(FILE *fp)
     }
 
     if (m_CameraFlags & ARTEMIS_PROPERTIES_CAMERAFLAGS_HAS_FILTERWHEEL)
-        IUSaveConfigText(fp, FilterNameTP);
+        FilterNameTP.save(fp);
     // JM 2020-01-15: Seems like setting filter slot results in spinning
     // of filter wheel. So we just save the filter names.
     //INDI::FilterInterface::saveConfigItems(fp);
